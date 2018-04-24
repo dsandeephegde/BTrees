@@ -1,4 +1,4 @@
-## B-tree
+## B-trees
 
 #### Goal 
 To insert and search data on disk using B-trees.
