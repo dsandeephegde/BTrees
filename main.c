@@ -9,8 +9,7 @@ typedef struct {  /* B-tree node */
     long *child;    /* Node's child subtree offsets */
 } btree_node;
 
-int order = 4;    /* B-tree order */
-
+int order;    /* B-tree order */
 btree_node rootNode;  /* Single B-tree node */
 FILE *fp; /* Input file stream */
 long root; /* Offset of B-tree root node */
@@ -23,6 +22,11 @@ btree_node newNode() {
     return node;
 }
 
+void freeNode(btree_node *node) {
+    free(node->key);
+    free(node->child);
+}
+
 int comparator(const void *p, const void *q);
 
 void addKey(int key);
@@ -31,7 +35,7 @@ void writeNode(btree_node node, FILE *file, long offset);
 
 btree_node readNode(FILE *file, long offset);
 
-int findKey(int key, long node);
+int findKey(int key, long offset);
 
 long getEndOffset(FILE *file);
 
@@ -39,21 +43,22 @@ void appendNode(btree_node node, FILE *file) ;
 
 long findNodeWithChild(long offset, long childOffset, int key);
 
-void printLevel(int level, long nodesToPrint[], int size);
+void printTreeLevel(int level, long *nodesToPrint, int size);
 
-void promoteToParentNode(long parentOffset, long rightChildOffset, int promotedKey);
+void promoteToParentNode(long nodeOffset, long rightChildOffset, int promotedKey);
+
+void assignToNewRoot(long nodeOffset, long rightNodeOffset, int key);
 
 int main() {
     fp = fopen("index.bin", "r+b");
+    order = 4;
 
-    /* If file doesn't exist, set root offset to unknown and create * file, otherwise read the root offset at the front of the file */
     if (fp == NULL) {
         root = -1;
         fp = fopen("index.bin", "w+b");
         fwrite(&root, sizeof(long), 1, fp);
     } else {
         fread(&root, sizeof(long), 1, fp);
-        rootNode = readNode(fp, root);
     }
 
     char command[4096];
@@ -64,22 +69,23 @@ int main() {
         if (strncmp("add", command, 3) == 0) {
             strtok(command, " ");
             key = atoi(strtok(NULL, " "));
-            addKey(key);
-            rootNode = readNode(fp, root);
+            if(findKey(key, root) == 1){
+                printf("Entry with key=%d already exists\n", key);
+            } else {
+                addKey(key);
+            }
         } else if (strncmp("find", command, 4) == 0) {
             strtok(command, " ");
             key = atoi(strtok(NULL, " "));
-            rootNode = readNode(fp, root);
             if(findKey(key, root) == 1){
                 printf("Entry with key=%d exists\n", key);
             } else {
                 printf("Entry with key=%d does not exist\n", key);
             }
         } else if (strncmp("print", command, 5) == 0) {
-            rootNode = readNode(fp, root);
-            if(rootNode.n > 0){
+            if(root != -1){
                 long nodesToPrint[1] = {root};
-                printLevel(1, nodesToPrint, 1);
+                printTreeLevel(1, nodesToPrint, 1);
             }
         }
         gets(command);
@@ -88,7 +94,7 @@ int main() {
     return 0;
 }
 
-void printLevel(int level, long nodesToPrint[], int size) {
+void printTreeLevel(int level, long *nodesToPrint, int size) {
     long nextLevelNodes[(int)pow(order, level)];
     int index = 0;
     int i, j;
@@ -104,10 +110,11 @@ void printLevel(int level, long nodesToPrint[], int size) {
                 nextLevelNodes[index++] = node.child[j];
             }
         }
+        freeNode(&node);
     }
     printf("\n");
     if(index > 0){
-        printLevel(level+1, nextLevelNodes, index);
+        printTreeLevel(level + 1, nextLevelNodes, index);
     }
 }
 
@@ -116,6 +123,7 @@ int findKey(int key, long offset) {
     int i;
     for (i = 0; i < node.n; ++i) {
         if(node.key[i] == key){
+            freeNode(&node);
             return 1;
         } else if(node.key[i] > key) {
             break;
@@ -123,8 +131,11 @@ int findKey(int key, long offset) {
     }
 
     if(node.child[i] != NULL) {
-        return findKey(key, node.child[i]);
+        long childOffset = node.child[i];
+        freeNode(&node);
+        return findKey(key, childOffset);
     } else{
+        freeNode(&node);
         return -1;
     }
 }
@@ -136,8 +147,11 @@ long findLeafFor(int key, long offset){
         i++;
     }
     if(node.child[i] != NULL) {
-        return findLeafFor(key, node.child[i]);
+        long childOffset = node.child[i];
+        freeNode(&node);
+        return findLeafFor(key, childOffset);
     } else{
+        freeNode(&node);
         return offset;
     }
 }
@@ -149,25 +163,26 @@ long findNodeWithChild(long offset, long childOffset, int key) {
         i++;
     }
     if(node.child[i] != NULL && node.child[i] != childOffset) {
-        return findNodeWithChild(node.child[i], childOffset, key);
+        long nodeChildOffset = node.child[i];
+        freeNode(&node);
+        return findNodeWithChild(nodeChildOffset, childOffset, key);
     } else if(node.child[i] == childOffset){
+        freeNode(&node);
         return offset;
     } else {
+        freeNode(&node);
         return NULL;
     }
 }
 
 void addKey(int key) {
-    if(findKey(key, root) == 1){
-        printf("Entry with key=%d already exists\n", key);
-        return;
-    }
     if(root == -1){
         rootNode = newNode();
         root = getEndOffset(fp);
         fseek(fp, 0, SEEK_SET);
         fwrite(&root, sizeof(long), 1, fp);
         appendNode(rootNode, fp);
+        freeNode(&rootNode);
     }
     long leafOffset = findLeafFor(key, root);
     btree_node leafNode = readNode(fp, leafOffset);
@@ -175,6 +190,7 @@ void addKey(int key) {
         leafNode.key[leafNode.n++] = key;
         qsort(leafNode.key, leafNode.n, sizeof(int), comparator);
         writeNode(leafNode, fp, leafOffset);
+        freeNode(&leafNode);
     } else {
         int temp[order];
         int i = 0;
@@ -194,6 +210,7 @@ void addKey(int key) {
         }
         long rightLeafOffset = getEndOffset(fp);
         appendNode(rightLeafNode, fp);
+        freeNode(&rightLeafNode);
 
         leafNode.n = m;
         for (j = 0; j < leafNode.n; ++j) {
@@ -202,42 +219,37 @@ void addKey(int key) {
         writeNode(leafNode, fp, leafOffset);
 
         // insert key to node's parent.
-        long parent = findNodeWithChild(root, leafOffset, leafNode.key[0]);
-        if(parent == NULL){
-            rootNode = newNode();
-            rootNode.key[0] = temp[m];
-            rootNode.n = 1;
-            rootNode.child[0] = leafOffset;
-            rootNode.child[1] = rightLeafOffset;
-            root = getEndOffset(fp);
-            fseek(fp, 0, SEEK_SET);
-            fwrite(&root, sizeof(long), 1, fp);
-            writeNode(rootNode, fp, root);
+        long parentOffset = findNodeWithChild(root, leafOffset, leafNode.key[0]);
+        freeNode(&leafNode);
+        if(parentOffset == NULL){
+            assignToNewRoot(leafOffset, rightLeafOffset, temp[m]);
         } else {
-            promoteToParentNode(parent, rightLeafOffset, temp[m]);
+            promoteToParentNode(parentOffset, rightLeafOffset, temp[m]);
         }
     }
 }
 
-void promoteToParentNode(long parentOffset, long rightChildOffset, int promotedKey) {
-    btree_node parentNode = readNode(fp, parentOffset);
+void promoteToParentNode(long nodeOffset, long rightChildOffset, int promotedKey) {
+    btree_node node = readNode(fp, nodeOffset);
     int k;
-    if (parentNode.n < order - 1) {
+    if (node.n < order - 1) {
         int index = 0;
-        while (index < parentNode.n && parentNode.key[index] < promotedKey) {
+        while (index < node.n && node.key[index] < promotedKey) {
             index++;
         }
-        parentNode.n++;
-        for (k = parentNode.n; k > index; --k) {
-            parentNode.key[k] = parentNode.key[k - 1];
-            parentNode.child[k] = parentNode.child[k - 1];
+        node.n++;
+        node.child[node.n] = node.child[node.n - 1];
+        for (k = node.n - 1; k > index; --k) {
+            node.key[k] = node.key[k - 1];
+            node.child[k] = node.child[k - 1];
         }
-        parentNode.key[index] = promotedKey;
-        parentNode.child[index + 1] = rightChildOffset;
-        writeNode(parentNode, fp, parentOffset);
+        node.key[index] = promotedKey;
+        node.child[index + 1] = rightChildOffset;
+        writeNode(node, fp, nodeOffset);
+        freeNode(&node);
     } else {
         int indexOfPromotedKey = 0;
-        while (indexOfPromotedKey < parentNode.n && parentNode.key[indexOfPromotedKey] < promotedKey){
+        while (indexOfPromotedKey < node.n && node.key[indexOfPromotedKey] < promotedKey){
             indexOfPromotedKey++;
         }
 
@@ -245,58 +257,65 @@ void promoteToParentNode(long parentOffset, long rightChildOffset, int promotedK
         int tempKeys[order];
         int i = 0;
         for (; i < indexOfPromotedKey; ++i) {
-            tempKeys[i] = parentNode.key[i];
-            tempChildren[i] = parentNode.child[i];
+            tempKeys[i] = node.key[i];
+            tempChildren[i] = node.child[i];
         }
         tempKeys[i] = promotedKey;
-        tempChildren[i] = parentNode.child[indexOfPromotedKey];
+        tempChildren[i] = node.child[indexOfPromotedKey];
         i++;
         tempChildren[i] = rightChildOffset;
 
         for (k = indexOfPromotedKey; k < order-1; ++k) {
-            tempKeys[i] = parentNode.key[k];
+            tempKeys[i] = node.key[k];
             i++;
-            tempChildren[i] = parentNode.child[k+1];
+            tempChildren[i] = node.child[k+1];
         }
 
         int m = (int) ceil((double) (order - 1) / 2);
 
-        btree_node rightLeafNode = newNode();
-        rightLeafNode.n = order - m - 1;
+        btree_node rightNode = newNode();
+        rightNode.n = order - m - 1;
         int j = 0;
-        for (; j < rightLeafNode.n; ++j) {
-            rightLeafNode.key[j] = tempKeys[m + j + 1];
-            rightLeafNode.child[j] = tempChildren[m + j + 1];
+        for (; j < rightNode.n; ++j) {
+            rightNode.key[j] = tempKeys[m + j + 1];
+            rightNode.child[j] = tempChildren[m + j + 1];
         }
-        rightLeafNode.child[j] = tempChildren[m + j + 1];
-        long rightLeafOffset = getEndOffset(fp);
-        appendNode(rightLeafNode, fp);
+        rightNode.child[j] = tempChildren[m + j + 1];
+        long rightNodeOffset = getEndOffset(fp);
+        appendNode(rightNode, fp);
+        freeNode(&rightNode);
 
-        parentNode.n = m;
+        node.n = m;
         int l;
-        for (l = 0; l < parentNode.n; ++l) {
-            parentNode.key[l] = tempKeys[l];
-            parentNode.child[l] = tempChildren[l];
+        for (l = 0; l < node.n; ++l) {
+            node.key[l] = tempKeys[l];
+            node.child[l] = tempChildren[l];
         }
-        parentNode.child[l] = tempChildren[l];
-        writeNode(parentNode, fp, parentOffset);
+        node.child[l] = tempChildren[l];
+        writeNode(node, fp, nodeOffset);
 
         // insert key to node's parent.
-        long parent = findNodeWithChild(root, parentOffset, parentNode.key[0]);
-        if (parent == NULL) {
-            rootNode = newNode();
-            rootNode.key[0] = tempKeys[m];
-            rootNode.n = 1;
-            rootNode.child[0] = parentOffset;
-            rootNode.child[1] = rightLeafOffset;
-            root = getEndOffset(fp);
-            fseek(fp, 0, SEEK_SET);
-            fwrite(&root, sizeof(long), 1, fp);
-            writeNode(rootNode, fp, root);
+        long parentOffset = findNodeWithChild(root, nodeOffset, node.key[0]);
+        freeNode(&node);
+        if (parentOffset == NULL) {
+            assignToNewRoot(nodeOffset, rightNodeOffset, tempKeys[m]);
         } else {
-            promoteToParentNode(parent, rightLeafOffset, tempKeys[m]);
+            promoteToParentNode(parentOffset, rightNodeOffset, tempKeys[m]);
         }
     }
+}
+
+void assignToNewRoot(long nodeOffset, long rightNodeOffset, int key) {
+    rootNode = newNode();
+    rootNode.key[0] = key;
+    rootNode.n = 1;
+    rootNode.child[0] = nodeOffset;
+    rootNode.child[1] = rightNodeOffset;
+    root = getEndOffset(fp);
+    fseek(fp, 0, SEEK_SET);
+    fwrite(&root, sizeof(long), 1, fp);
+    writeNode(rootNode, fp, root);
+    freeNode(&rootNode);
 }
 
 long getEndOffset(FILE *file) {
